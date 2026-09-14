@@ -1,0 +1,8 @@
+,0
+target_fs,500.0
+highpass_hz,0.5
+line_hz,60.0
+line_harmonics,3.0
+notch_q,30.0
+artifact_mad_z,6.0
+artifact_pad_s,0.25

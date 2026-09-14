@@ -1,0 +1,14 @@
+cohort,group,region,n_excluded,n_files_in_group,pct_of_group_files
+C1,psi,BLA,4,28,14.285714285714286
+C1,psi,mPFC,4,28,14.285714285714286
+C1,psi,vHPC,1,28,3.5714285714285716
+C1,sal,BLA,5,28,17.857142857142858
+C2,psi,mPFC,4,20,20.0
+C2,sal,BLA,1,24,4.166666666666667
+C2,sal,mPFC,8,24,33.333333333333336
+C3,ket,BLA,2,20,10.0
+C3,ket,mPFC,2,20,10.0
+C3,psi,BLA,1,20,5.0
+C3,sal,BLA,3,20,15.0
+C3,sal,mPFC,3,20,15.0
+C4,ket_sal,mPFC,1,16,6.25
