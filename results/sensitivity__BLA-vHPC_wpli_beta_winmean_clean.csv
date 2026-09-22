@@ -1,0 +1,4 @@
+analysis,n_per_group,d,note
+minimum detectable Cohen's d at 80% power,5.0,1.7718780696593193,
+minimum detectable Cohen's d at 90% power,5.0,2.0501144418242236,
+INTERPRETATION,,,"If that d is larger than effects typical in this literature, a null result here is uninformative -- say so explicitly in the discussion rather than claiming 'no effect'."

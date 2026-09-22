@@ -12,6 +12,8 @@ Nat Neurosci) before changing that.
 Run:
     python step5_stats.py --features ../derived/features_session.csv \
                           --metric burst_rate_per_min --out ../results
+    python step5_stats.py --features ../derived/features_dynamic.csv \
+                          --metrics primary --out ../results
 """
 
 from __future__ import annotations
@@ -24,7 +26,9 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "python"))
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "python"))
+from lfp_config import PRIMARY_METRICS  # noqa: E402
 from exclusions import (  # noqa: E402
     apply_exclusions,
     bad_channel_map,
@@ -37,6 +41,36 @@ try:
     HAVE_SM = True
 except ImportError:
     HAVE_SM = False
+
+CHECKLIST = [
+    "## Reporting checklist",
+    "- [ ] Unit of analysis is the animal, not the burst or the time window",
+    "- [ ] Effect sizes with bootstrap CIs reported alongside every p-value",
+    "- [ ] FDR correction applied across the primary metric family",
+    "- [ ] Primary hypothesis was declared before looking; everything else "
+    "labelled exploratory",
+    "- [ ] Artifact-rejection rates compared across groups",
+    "- [ ] Sensitivity analysis reported for any null result",
+    "- [ ] Dead-channel exclusions reported with per-group counts",
+]
+
+
+def _formula_frame(df: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, str]:
+    """Rename hyphenated metrics so patsy formulas parse."""
+    safe = metric.replace("-", "_")
+    if safe == metric:
+        return df, metric
+    return df.rename(columns={metric: safe}), safe
+
+
+def parse_metrics(metric: str | None, metrics: str | None) -> list[str]:
+    """``--metrics primary`` or a comma list; else a single ``--metric``."""
+    if metrics:
+        raw = metrics.strip()
+        if raw.lower() == "primary":
+            return list(PRIMARY_METRICS)
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    return [metric or "burst_rate_per_min"]
 
 
 # ------------------------------------------------------------------
@@ -131,8 +165,9 @@ def analysis_crossover(df, metric, rectypes=("EZM",)) -> tuple[pd.DataFrame, pd.
 
     if HAVE_SM and len(a) >= 6:
         try:
-            m = smf.mixedlm(f"{metric} ~ drug + cohort", a,
-                            groups=a["mouse"] + "_" + a["cohort"]).fit()
+            a_m, mname = _formula_frame(a, metric)
+            m = smf.mixedlm(f"{mname} ~ drug + cohort", a_m,
+                            groups=a_m["mouse"] + "_" + a_m["cohort"]).fit()
             for name in m.params.index:
                 if name.startswith("drug"):
                     rows.append(dict(analysis=f"LMM {name}",
@@ -187,7 +222,8 @@ def analysis_pooled_2x2(df, metric, rectypes=("EPM",)) -> pd.DataFrame:
                  note=str(a.groupby(["blocker", "drug"]).size().to_dict()))]
     if HAVE_SM and len(a) >= 8:
         try:
-            m = smf.ols(f"{metric} ~ C(blocker) * C(drug) + C(cohort)", a).fit()
+            a_m, mname = _formula_frame(a, metric)
+            m = smf.ols(f"{mname} ~ C(blocker) * C(drug) + C(cohort)", a_m).fit()
             for name in m.params.index:
                 rows.append(dict(analysis=f"OLS {name}",
                                  estimate=float(m.params[name]),
@@ -252,15 +288,68 @@ def _exclusion_markdown(bad: pd.DataFrame, summary: pd.DataFrame,
     return lines
 
 
+def _crossover_row(xtab: pd.DataFrame) -> pd.Series | None:
+    if xtab is None or xtab.empty:
+        return None
+    if "analysis" in xtab.columns:
+        hit = xtab[xtab["analysis"] == "C1+C2 crossover psi vs sal"]
+        if not hit.empty:
+            return hit.iloc[0]
+    return xtab.iloc[0]
+
+
+def _crossover_p(xtab: pd.DataFrame) -> float:
+    row = _crossover_row(xtab)
+    if row is None or "p_paired_t" not in row.index:
+        return float("nan")
+    val = row["p_paired_t"]
+    return float(val) if pd.notna(val) else float("nan")
+
+
+def _run_one(df: pd.DataFrame, metric: str, out: Path, suffix: str) -> dict:
+    xtab, loo = analysis_crossover(df, metric)
+    blocks = {
+        "crossover_C1C2": xtab,
+        "crossover_loo": loo,
+        "threearm_C3": analysis_c3(df, metric),
+        "pooled_2x2_C3C4": analysis_pooled_2x2(df, metric),
+        "sensitivity": sensitivity(df, metric),
+    }
+    safe_file = metric.replace("/", "_")
+    lines = [f"# Statistical report — metric: `{metric}`", ""]
+    for name, tbl in blocks.items():
+        dest = out / f"{name}__{safe_file}{suffix}.csv"
+        tbl.to_csv(dest, index=False)
+        lines += [f"## {name}", "", tbl.to_markdown(index=False), ""]
+        print(f"\n=== {metric} / {name} ===")
+        print(tbl.to_string(index=False) if len(tbl) else "(empty)")
+    lines += CHECKLIST
+    report = out / f"report__{safe_file}{suffix}.md"
+    report.write_text("\n".join(lines))
+    print(f"Wrote {report}")
+    row = _crossover_row(xtab)
+    return {
+        "metric": metric,
+        "p_crossover": _crossover_p(xtab),
+        "n_pairs": float(row["n_pairs"]) if row is not None and "n_pairs" in row.index else float("nan"),
+        "mean_diff": float(row["mean_diff"]) if row is not None and "mean_diff" in row.index else float("nan"),
+    }
+
+
 def run(*, features: Path, out: Path, metric: str = "burst_rate_per_min",
-        qc_path: Path | None = None, exclude: bool = True) -> None:
+        metrics: str | None = None, qc_path: Path | None = None,
+        exclude: bool = True) -> None:
     out.mkdir(parents=True, exist_ok=True)
     suffix = "_clean" if exclude else ""
+    wanted = parse_metrics(metric, metrics)
 
     df = pd.read_csv(features)
-    if metric not in df.columns:
-        raise SystemExit(f"{metric} not in features. Available:\n"
-                         + "\n".join(c for c in df.columns if df[c].dtype.kind == "f"))
+    missing = [m for m in wanted if m not in df.columns]
+    keep = [m for m in wanted if m in df.columns]
+    if missing:
+        print("Skipping metrics not in the features table:\n  " + "\n  ".join(missing))
+    if not keep:
+        raise SystemExit("None of the requested metrics are in the features table.")
 
     n_files = len(df)
     excl_md = [
@@ -279,46 +368,44 @@ def run(*, features: Path, out: Path, metric: str = "burst_rate_per_min",
         summary = exclusion_report(audit if not audit.empty else bad, qc)
         excl_md = _exclusion_markdown(bad, summary, n_files)
 
-    xtab, loo = analysis_crossover(df, metric)
-    blocks = {
-        "crossover_C1C2": xtab,
-        "crossover_loo": loo,
-        "threearm_C3": analysis_c3(df, metric),
-        "pooled_2x2_C3C4": analysis_pooled_2x2(df, metric),
-        "sensitivity": sensitivity(df, metric),
-    }
+    summaries = [_run_one(df, m, out, suffix) for m in keep]
+    fdr_tbl = pd.DataFrame(summaries)
+    if len(fdr_tbl) >= 2 and fdr_tbl["p_crossover"].notna().sum() >= 2:
+        p = fdr_tbl["p_crossover"].to_numpy(float)
+        finite = np.isfinite(p)
+        padj = np.full_like(p, np.nan, dtype=float)
+        rej = np.zeros(len(p), dtype=bool)
+        if finite.any():
+            r, a = fdr(p[finite])
+            padj[finite] = a
+            rej[finite] = r
+        fdr_tbl["p_crossover_fdr"] = padj
+        fdr_tbl["reject_fdr"] = rej
+    dest = out / f"primary_metrics_fdr{suffix}.csv"
+    fdr_tbl.to_csv(dest, index=False)
 
-    lines = [f"# Statistical report — metric: `{metric}`", ""]
+    header = keep[0] if len(keep) == 1 else "primary_metrics"
+    lines = [f"# Statistical report — metrics: {', '.join(f'`{m}`' for m in keep)}", ""]
     if exclude:
         lines += ["_Dead channels excluded. Filenames use the `_clean` suffix._", ""]
     lines += excl_md
-    for name, tbl in blocks.items():
-        dest = out / f"{name}__{metric}{suffix}.csv"
-        tbl.to_csv(dest, index=False)
-        lines += [f"## {name}", "", tbl.to_markdown(index=False), ""]
-        print(f"\n=== {name} ===")
-        print(tbl.to_string(index=False) if len(tbl) else "(empty)")
-
-    lines += [
-        "## Reporting checklist",
-        "- [ ] Unit of analysis is the animal, not the burst or the time window",
-        "- [ ] Effect sizes with bootstrap CIs reported alongside every p-value",
-        "- [ ] FDR correction applied across the region x band family",
-        "- [ ] Primary hypothesis was declared before looking; everything else "
-        "labelled exploratory",
-        "- [ ] Artifact-rejection rates compared across groups",
-        "- [ ] Sensitivity analysis reported for any null result",
-        "- [ ] Dead-channel exclusions reported with per-group counts",
-    ]
-    report = out / f"report__{metric}{suffix}.md"
-    report.write_text("\n".join(lines))
-    print(f"\nWrote {report}")
+    lines += ["## C1/C2 crossover FDR across metrics", "",
+              fdr_tbl.to_markdown(index=False), ""]
+    lines += CHECKLIST
+    summary_report = out / f"report__{header}{suffix}.md"
+    if len(keep) > 1:
+        summary_report = out / f"report__primary_metrics{suffix}.md"
+    summary_report.write_text("\n".join(lines))
+    print(f"\nWrote {summary_report}")
+    print(f"Wrote {dest}")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--features", required=True, type=Path)
     ap.add_argument("--metric", default="burst_rate_per_min")
+    ap.add_argument("--metrics", default=None,
+                    help="comma-separated list, or 'primary' for the declared set")
     ap.add_argument("--out", default=Path("../results"), type=Path)
     ap.add_argument("--qc", default=None, type=Path,
                     help="QC table (default: <features-dir>/qc.csv)")
@@ -328,7 +415,7 @@ def main() -> None:
     ap.set_defaults(exclude=True)
     args = ap.parse_args()
     run(features=args.features, out=args.out, metric=args.metric,
-        qc_path=args.qc, exclude=args.exclude)
+        metrics=args.metrics, qc_path=args.qc, exclude=args.exclude)
 
 
 if __name__ == "__main__":

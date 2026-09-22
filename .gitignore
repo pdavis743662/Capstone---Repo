@@ -4,3 +4,5 @@ __pycache__/
 .DS_Store
 .ipynb_checkpoints/
 derived/clean/
+derived/clean/.npz_tmp/
+figures_video/

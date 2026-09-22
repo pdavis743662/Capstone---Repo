@@ -1,9 +1,8 @@
 """
 Stage 4 -- The figure catalog.
 
-Builds F0 (QC dashboard) through F6 from the CSVs written by stages 2 and 3.
-Figures read only CSVs -- never raw data -- so they regenerate in seconds and
-you can iterate on presentation without recomputing anything.
+Builds F0 (QC dashboard) through F10 from the CSVs/parquet written by later
+stages. F7 needs the window table (Stage 6); F8–F10 need ``*_winmean`` / ``*_winvar``.
 
 Run:
     python step4_figures.py --derived ../derived --out ../figures_clean
@@ -20,12 +19,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "python"))
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "python"))
 from exclusions import (  # noqa: E402
     apply_exclusions,
     bad_channel_map,
     find_bad_channels,
 )
+from lfp_video import paint_wpli_triangle, triangle_edge_vals  # noqa: E402
 
 plt.rcParams.update({
     "figure.dpi": 120, "savefig.dpi": 300, "savefig.bbox": "tight",
@@ -291,6 +292,196 @@ def fig6_phase_polar(feat: pd.DataFrame, out: Path) -> None:
     plt.close(fig)
 
 
+def _load_windows(derived: Path) -> pd.DataFrame | None:
+    parquet = derived / "windows.parquet"
+    csv_path = derived / "windows.csv"
+    if parquet.exists():
+        return pd.read_parquet(parquet)
+    if csv_path.exists():
+        return pd.read_csv(csv_path)
+    return None
+
+
+def _example_c1_ezm_stems(feat: pd.DataFrame) -> tuple[str | None, str | None]:
+    """One C1 psi EZM stem and one C1 sal EZM stem."""
+    ezm = feat[(feat.cohort == "C1") & (feat.rectype == "EZM")]
+    col = "BLA-vHPC_wpli_beta"
+    if col in ezm.columns:
+        ezm = ezm.dropna(subset=[col])
+    if not {"psi", "sal"}.issubset(set(ezm.drug.unique())):
+        return None, None
+    psi = str(ezm.loc[ezm.drug == "psi", "stem"].iloc[0])
+    sal = str(ezm.loc[ezm.drug == "sal", "stem"].iloc[0])
+    return psi, sal
+
+
+# ----------------------------------------------------------------- F7
+def fig7_wpli_trace(windows: pd.DataFrame, feat: pd.DataFrame, out: Path) -> None:
+    """Time-resolved BLA-vHPC beta wPLI for one psi vs one sal EZM."""
+    col = "BLA-vHPC_wpli_beta"
+    if windows is None or windows.empty or col not in windows.columns:
+        print("F7 skipped: window table missing BLA-vHPC_wpli_beta")
+        return
+    psi, sal = _example_c1_ezm_stems(feat)
+    if not psi or not sal:
+        print("F7 skipped: need C1 EZM psi and sal stems")
+        return
+    fig, ax = plt.subplots(figsize=(8.5, 3.2))
+    for stem, label, color in ((psi, "psi", "tab:blue"), (sal, "sal", "0.35")):
+        sub = windows[windows.stem == stem].sort_values("t_start")
+        if sub.empty:
+            print(f"F7 skipped: {stem} not in window table")
+            plt.close(fig)
+            return
+        tc = 0.5 * (sub.t_start + sub.t_end)
+        ax.plot(tc, sub[col], lw=1.4, color=color, label=f"{label}  {stem}")
+    ax.set_xlabel("time (s)")
+    ax.set_ylabel("BLA–vHPC β wPLI")
+    ax.set_ylim(0, 1)
+    ax.legend(fontsize=7)
+    ax.set_title(_t("F7 — 10 s BLA–vHPC beta wPLI (example C1 EZM pair)"),
+                 fontweight="bold")
+    fig.savefig(out / "F7_wpli_trace.pdf")
+    plt.close(fig)
+
+
+# ----------------------------------------------------------------- F8
+def fig8_wpli_var_slopegraph(feat: pd.DataFrame, out: Path) -> None:
+    """C1/C2 crossover: variance of 10 s BLA-vHPC beta wPLI (Kirkby analog)."""
+    metric = "BLA-vHPC_wpli_beta_winvar"
+    if metric not in feat.columns:
+        print("F8 skipped: BLA-vHPC_wpli_beta_winvar not in features")
+        return
+    sub = feat[(feat.cohort.isin(["C1", "C2"])) & (feat.rectype == "EZM")]
+    if sub.empty or not {"sal", "psi"}.issubset(set(sub.drug.unique())):
+        print("F8 skipped: need C1/C2 EZM rows for both sal and psi.")
+        return
+    piv = sub.pivot_table(index=["cohort", "mouse"], columns="drug", values=metric)
+    missing = [c for c in ("sal", "psi") if c not in piv.columns]
+    if missing:
+        print(f"F8 skipped: pivot missing {missing}")
+        return
+    piv = piv.dropna(subset=["sal", "psi"], how="any")
+    if piv.empty:
+        print("F8 skipped: no mouse has both a saline and a psilocybin EZM.")
+        return
+
+    fig, ax = plt.subplots(figsize=(3.4, 4))
+    for (c, _m), r in piv.iterrows():
+        ax.plot([0, 1], [r["sal"], r["psi"]], "-o", ms=5, lw=1.2, alpha=.75,
+                color="tab:blue" if c == "C1" else "tab:orange")
+    ax.hlines([piv["sal"].mean(), piv["psi"].mean()], [-.15, .85], [.15, 1.15],
+              color="k", lw=2.5)
+    ax.set_xticks([0, 1]); ax.set_xticklabels(["saline", "psilocybin"])
+    ax.set_xlim(-.35, 1.35)
+    ax.set_ylabel(metric.replace("_", " "))
+    ax.set_title(_t(f"F8 — BLA–vHPC β wPLI variance (n={len(piv)} paired)"),
+                 fontweight="bold", fontsize=10)
+    fig.savefig(out / "F8_wpli_var_slopegraph.pdf")
+    plt.close(fig)
+
+
+def _ezm_minus_bl1(feat: pd.DataFrame, metric: str) -> pd.DataFrame:
+    """One row per mouse-week: Δ = behavior (EZM/EPM) − BL1."""
+    sub = feat[feat.cohort.isin(["C1", "C2"])]
+    if metric not in sub.columns:
+        return pd.DataFrame()
+    beh = sub[sub.rectype.isin(["EZM", "EPM"])][
+        ["cohort", "mouse", "drug", "session_uid", metric]
+    ].rename(columns={metric: "beh"})
+    bl1 = sub[sub.rectype == "BL1"][["session_uid", metric]].rename(columns={metric: "bl1"})
+    m = beh.merge(bl1, on="session_uid", how="inner")
+    m["delta"] = m["beh"] - m["bl1"]
+    return m.dropna(subset=["delta"])
+
+
+# ----------------------------------------------------------------- F9
+def fig9_wpli_triangles(feat: pd.DataFrame, out: Path) -> None:
+    """Per-mouse 2x2 β wPLI triangles: saline/psi × BL1/EZM."""
+    sub = feat[feat.cohort.isin(["C1", "C2"])]
+    uids = []
+    for uid, g in sub.groupby("subject_uid"):
+        drugs = set(g.drug)
+        recs = set(g.rectype)
+        if {"sal", "psi"} <= drugs and "BL1" in recs and ({"EZM", "EPM"} & recs):
+            uids.append(uid)
+    uids = sorted(uids)
+    if not uids:
+        print("F9 skipped: no C1/C2 mouse with sal+psi BL1 and EZM/EPM")
+        return
+    ncol_mice = 3
+    nrow_mice = int(np.ceil(len(uids) / ncol_mice))
+    fig = plt.figure(figsize=(11.5, 3.3 * nrow_mice))
+    outer = fig.add_gridspec(nrow_mice, ncol_mice, hspace=0.55, wspace=0.35,
+                             left=0.04, right=0.98, top=0.93, bottom=0.04)
+    corners = [("sal", "BL1"), ("psi", "BL1"), ("sal", "EZM"), ("psi", "EZM")]
+    for i, uid in enumerate(uids):
+        r, c = divmod(i, ncol_mice)
+        inner = outer[r, c].subgridspec(2, 2, wspace=0.15, hspace=0.35)
+        g = sub[sub.subject_uid == uid]
+        mouse = str(g.mouse.iloc[0])
+        coh = str(g.cohort.iloc[0])
+        for k, (drug, rec) in enumerate(corners):
+            ax = fig.add_subplot(inner[k // 2, k % 2])
+            recs = (rec,) if rec == "BL1" else ("EZM", "EPM")
+            hit = g[(g.drug == drug) & (g.rectype.isin(recs))]
+            row = None if hit.empty else hit.iloc[0]
+            vals = triangle_edge_vals(row, suffix="_winmean") if row is not None else triangle_edge_vals(None)
+            head = f"{coh} {mouse}\n" if k == 0 else ""
+            paint_wpli_triangle(ax, vals, title=f"{head}{drug} {rec}", fontsize=6)
+    fig.suptitle(_t("F9 — Same mouse, two weeks: mean β wPLI (BL1 vs maze)"),
+                 fontweight="bold", fontsize=12)
+    fig.savefig(out / "F9_wpli_triangles.pdf")
+    plt.close(fig)
+
+
+# ----------------------------------------------------------------- F10
+def fig10_delta_slopegraphs(feat: pd.DataFrame, out: Path) -> None:
+    """C1/C2: Δ(EZM−BL1) for three β wPLI edges (and burst rate). Exploratory."""
+    metrics = [
+        ("burst_rate_per_min", "burst rate / min"),
+        ("BLA-vHPC_wpli_beta_winmean", "BLA–vHPC β wPLI"),
+        ("BLA-mPFC_wpli_beta_winmean", "BLA–mPFC β wPLI"),
+        ("vHPC-mPFC_wpli_beta_winmean", "vHPC–mPFC β wPLI"),
+    ]
+    fig, axes = plt.subplots(1, 4, figsize=(11.2, 3.6))
+    any_ok = False
+    for ax, (metric, ylab) in zip(axes, metrics):
+        d = _ezm_minus_bl1(feat, metric)
+        if d.empty:
+            ax.set_visible(False)
+            continue
+        piv = d.pivot_table(index=["cohort", "mouse"], columns="drug", values="delta")
+        if not {"sal", "psi"}.issubset(piv.columns):
+            ax.set_visible(False)
+            continue
+        piv = piv.dropna(subset=["sal", "psi"], how="any")
+        if piv.empty:
+            ax.set_visible(False)
+            continue
+        any_ok = True
+        for (c, _m), r in piv.iterrows():
+            ax.plot([0, 1], [r["sal"], r["psi"]], "-o", ms=5, lw=1.2, alpha=.75,
+                    color="tab:blue" if c == "C1" else "tab:orange")
+        ax.hlines([piv["sal"].mean(), piv["psi"].mean()], [-.15, .85], [.15, 1.15],
+                  color="k", lw=2.2)
+        ax.axhline(0, color="0.7", lw=0.8, ls="--")
+        ax.set_xticks([0, 1])
+        ax.set_xticklabels(["saline\nΔ", "psi\nΔ"])
+        ax.set_xlim(-.35, 1.35)
+        ax.set_ylabel(f"Δ {ylab}")
+        ax.set_title(f"n={len(piv)}", fontsize=9)
+    if not any_ok:
+        plt.close(fig)
+        print("F10 skipped: need winmean/burst Δ for C1/C2")
+        return
+    fig.suptitle(_t("F10 — Exploratory: EZM − BL1, then psi vs saline (C1/C2)"),
+                 fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(out / "F10_delta_slopegraphs.pdf")
+    plt.close(fig)
+
+
 # -----------------------------------------------------------------
 def run(*, derived: Path, out: Path, qc_path: Path | None = None,
         exclude: bool = True) -> None:
@@ -301,11 +492,19 @@ def run(*, derived: Path, out: Path, qc_path: Path | None = None,
     qc_p = Path(qc_path) if qc_path is not None else derived / "qc.csv"
     ft_p = derived / "features_session.csv"
     nm_p = derived / "features_normalized.csv"
+    dyn_p = derived / "features_dynamic.csv"
 
     qc = pd.read_csv(qc_p) if qc_p.exists() else None
     feat = pd.read_csv(ft_p) if ft_p.exists() else None
     norm = pd.read_csv(nm_p) if nm_p.exists() else None
+    dyn = pd.read_csv(dyn_p) if dyn_p.exists() else None
+    windows = _load_windows(derived)
     audit = pd.DataFrame()
+
+    if dyn is not None and feat is not None:
+        extra = [c for c in dyn.columns if c not in feat.columns]
+        if extra:
+            feat = feat.merge(dyn[["stem", *extra]], on="stem", how="left")
 
     if exclude:
         if qc is None:
@@ -331,6 +530,10 @@ def run(*, derived: Path, out: Path, qc_path: Path | None = None,
         fig4_bursts(feat, out); print("F4 ok")
         fig5_slopegraph(feat, out); print("F5 ok")
         fig6_phase_polar(feat, out); print("F6 ok")
+        fig7_wpli_trace(windows, feat, out); print("F7 ok")
+        fig8_wpli_var_slopegraph(feat, out); print("F8 ok")
+        fig9_wpli_triangles(feat, out); print("F9 ok")
+        fig10_delta_slopegraphs(feat, out); print("F10 ok")
 
     print(f"\nFigures written to {out}")
 
