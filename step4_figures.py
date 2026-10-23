@@ -1,8 +1,21 @@
 """
 Stage 4 -- The figure catalog.
 
-Builds F0 (QC dashboard) through F10 from the CSVs/parquet written by later
-stages. F7 needs the window table (Stage 6); F8–F10 need ``*_winmean`` / ``*_winvar``.
+Reads tables already written by Stages 1-3 and 6. Does not recompute LFP.
+
+    F0 / F0g  QC and exclusion counts
+    F3        band power vs BL1 heatmap
+    F4        burst rate (one point = one animal)
+    F5        C1/C2 burst-rate slopegraph
+    F6        BLA-vHPC beta phase lag (polar)
+    F7        example 10 s beta wPLI traces (needs windows.csv)
+    F8        Kirkby analog: beta wPLI variance slopegraph
+    F9        per-mouse beta wPLI triangles (BL1 vs maze, sal vs psi)
+    F10       exploratory Delta(EZM-BL1) slopegraphs
+    F11       group mean+/-SEM multi-band traces vs session fraction
+    F12       one demo mouse 2x3 band compare (same renderer as Stage 9)
+
+Default --exclude writes to figures_clean and NaNs dead channels first.
 
 Run:
     python step4_figures.py --derived ../derived --out ../figures_clean
@@ -26,6 +39,9 @@ from exclusions import (  # noqa: E402
     bad_channel_map,
     find_bad_channels,
 )
+from lfp_band_compare import group_band_grid, render_band_compare_figure  # noqa: E402
+from lfp_config import BAND_COLORS, BAND_COMPARE_FRAC_GRID  # noqa: E402
+from lfp_pair import pick_demo_mouse_windows  # noqa: E402
 from lfp_video import paint_wpli_triangle, triangle_edge_vals  # noqa: E402
 
 plt.rcParams.update({
@@ -33,10 +49,12 @@ plt.rcParams.update({
     "font.size": 9, "axes.spines.top": False, "axes.spines.right": False,
 })
 
+# Local copies so this script still plots if lfp_config import order changes.
 REGIONS = ("BLA", "vHPC", "mPFC")
 BANDS = ("delta", "theta", "beta", "lgamma", "hgamma")
 RECORDER = ["BL1", "inj", "EZM", "EPM", "BL2"]
 
+# Appended to titles when --exclude is on so the PDF states the cleaning.
 TITLE_SUFFIX = ""
 
 
@@ -52,7 +70,8 @@ def _boxplot(ax, data, labels, **kw):
         return ax.boxplot(data, labels=labels, **kw)
 
 
-# ----------------------------------------------------------------- F0
+# F0: look at this before any science figure. Dead RMS cluster, artifact
+# imbalance across groups, and animal counts are the real n.
 def fig0_qc(qc: pd.DataFrame, out: Path) -> None:
     """QC dashboard. Build this FIRST and actually look at it."""
     fig, axes = plt.subplots(2, 3, figsize=(13, 7))
@@ -149,7 +168,7 @@ def fig0g_exclusions(audit: pd.DataFrame, qc: pd.DataFrame, out: Path) -> None:
     plt.close(fig)
 
 
-# ----------------------------------------------------------------- F3
+# F3: each cell is the mean across animals of that region's abs band vs BL1.
 def fig3_band_heatmap(norm: pd.DataFrame, out: Path) -> None:
     """Band power change vs that animal's own BL1, region x band, per group."""
     beh = norm[norm.rectype.isin(["EZM", "EPM", "inj"])]
@@ -189,7 +208,7 @@ def fig3_band_heatmap(norm: pd.DataFrame, out: Path) -> None:
     plt.close(fig)
 
 
-# ----------------------------------------------------------------- F4
+# F4: maze only. Mean +/- SEM bars; jittered points are animals, not windows.
 def fig4_bursts(feat: pd.DataFrame, out: Path, metric="burst_rate_per_min") -> None:
     beh = feat[feat.rectype.isin(["EZM", "EPM"])]
     per_animal = (beh.groupby(["cohort", "group", "subject_uid"])[metric]
@@ -224,7 +243,7 @@ def fig4_bursts(feat: pd.DataFrame, out: Path, metric="burst_rate_per_min") -> N
     plt.close(fig)
 
 
-# ----------------------------------------------------------------- F5
+# F5: paired lines. Blue = C1, orange = C2. Thick bars are group means.
 def fig5_slopegraph(feat: pd.DataFrame, out: Path, metric="burst_rate_per_min") -> None:
     """The crossover cohorts' superpower: each mouse is its own control."""
     sub = feat[(feat.cohort.isin(["C1", "C2"])) & (feat.rectype == "EZM")]
@@ -256,7 +275,7 @@ def fig5_slopegraph(feat: pd.DataFrame, out: Path, metric="burst_rate_per_min") 
     plt.close(fig)
 
 
-# ----------------------------------------------------------------- F6
+# F6: circular mean of BLA minus vHPC beta phase. Crimson arrow = group resultant.
 def fig6_phase_polar(feat: pd.DataFrame, out: Path) -> None:
     """Circular data on circular axes. Arrow length = consistency."""
     beh = feat[feat.rectype.isin(["EZM", "EPM"])].dropna(
@@ -293,6 +312,7 @@ def fig6_phase_polar(feat: pd.DataFrame, out: Path) -> None:
 
 
 def _load_windows(derived: Path) -> pd.DataFrame | None:
+    """Stage 6 table. None if neither parquet nor csv is present (F7/F11 skip)."""
     parquet = derived / "windows.parquet"
     csv_path = derived / "windows.csv"
     if parquet.exists():
@@ -315,7 +335,7 @@ def _example_c1_ezm_stems(feat: pd.DataFrame) -> tuple[str | None, str | None]:
     return psi, sal
 
 
-# ----------------------------------------------------------------- F7
+# F7: two example C1 EZM files, not a group result. Needs Stage 6 windows.
 def fig7_wpli_trace(windows: pd.DataFrame, feat: pd.DataFrame, out: Path) -> None:
     """Time-resolved BLA-vHPC beta wPLI for one psi vs one sal EZM."""
     col = "BLA-vHPC_wpli_beta"
@@ -345,7 +365,7 @@ def fig7_wpli_trace(windows: pd.DataFrame, feat: pd.DataFrame, out: Path) -> Non
     plt.close(fig)
 
 
-# ----------------------------------------------------------------- F8
+# F8: variance of 10 s BLA-vHPC beta wPLI. Analog of Kirkby coupling-variance.
 def fig8_wpli_var_slopegraph(feat: pd.DataFrame, out: Path) -> None:
     """C1/C2 crossover: variance of 10 s BLA-vHPC beta wPLI (Kirkby analog)."""
     metric = "BLA-vHPC_wpli_beta_winvar"
@@ -382,7 +402,7 @@ def fig8_wpli_var_slopegraph(feat: pd.DataFrame, out: Path) -> None:
 
 
 def _ezm_minus_bl1(feat: pd.DataFrame, metric: str) -> pd.DataFrame:
-    """One row per mouse-week: Δ = behavior (EZM/EPM) − BL1."""
+    """One row per mouse-week: Delta = maze minus that week's BL1, joined on session_uid."""
     sub = feat[feat.cohort.isin(["C1", "C2"])]
     if metric not in sub.columns:
         return pd.DataFrame()
@@ -395,7 +415,7 @@ def _ezm_minus_bl1(feat: pd.DataFrame, metric: str) -> pd.DataFrame:
     return m.dropna(subset=["delta"])
 
 
-# ----------------------------------------------------------------- F9
+# F9: 2x2 triangles per mouse (sal/psi x BL1/maze). Edge width/color = mean beta wPLI.
 def fig9_wpli_triangles(feat: pd.DataFrame, out: Path) -> None:
     """Per-mouse 2x2 β wPLI triangles: saline/psi × BL1/EZM."""
     sub = feat[feat.cohort.isin(["C1", "C2"])]
@@ -435,7 +455,7 @@ def fig9_wpli_triangles(feat: pd.DataFrame, out: Path) -> None:
     plt.close(fig)
 
 
-# ----------------------------------------------------------------- F10
+# F10: exploratory. First subtract BL1, then slopegraph psi vs sal on that Delta.
 def fig10_delta_slopegraphs(feat: pd.DataFrame, out: Path) -> None:
     """C1/C2: Δ(EZM−BL1) for three β wPLI edges (and burst rate). Exploratory."""
     metrics = [
@@ -482,9 +502,133 @@ def fig10_delta_slopegraphs(feat: pd.DataFrame, out: Path) -> None:
     plt.close(fig)
 
 
+# F11: each mouse resampled to a 0-1 session-fraction grid, then mean +/- SEM.
+def fig11_band_traces(
+    windows: pd.DataFrame,
+    feat: pd.DataFrame,
+    out: Path,
+) -> None:
+    """C1/C2 mean±SEM traces vs session fraction, per band, sal vs psi.
+
+    Exploratory. One mouse contributes one resampled trace per week.
+    """
+    if windows is None or windows.empty or feat is None or feat.empty:
+        print("F11 skipped: need windows.csv and a features table")
+        return
+    man_cols = [c for c in (
+        "stem", "cohort", "group", "drug", "mouse", "rectype", "subject_uid",
+        "session_uid",
+    ) if c in feat.columns]
+    if "stem" not in man_cols or "subject_uid" not in man_cols:
+        print("F11 skipped: features missing stem/subject_uid")
+        return
+    manifest = feat[man_cols].drop_duplicates("stem")
+    try:
+        grid_data = group_band_grid(windows, manifest)
+    except Exception as e:  # noqa: BLE001
+        print(f"F11 skipped: {e}")
+        return
+
+    bands = tuple(BAND_COLORS.keys())
+    panels = (
+        ("BLA", "BLA power / BL1"),
+        ("vHPC", "vHPC power / BL1"),
+        ("wpli", "BLA–vHPC wPLI"),
+    )
+    n_mice = 0
+    for band in bands:
+        arr = grid_data["wpli"][band]["sal"]
+        n_mice = max(n_mice, arr.shape[0])
+    if n_mice < 1:
+        print("F11 skipped: no C1/C2 mouse with both EZM weeks in windows.csv")
+        return
+
+    fig, axes = plt.subplots(3, 5, figsize=(12.4, 7.2), sharex=True)
+    grid = np.linspace(0.0, 1.0, BAND_COMPARE_FRAC_GRID)
+    for i, (panel, ylab) in enumerate(panels):
+        for j, band in enumerate(bands):
+            ax = axes[i, j]
+            for drug, color, lab in (
+                ("sal", "0.45", "saline"),
+                ("psi", "tab:blue", "psilocybin"),
+            ):
+                arr = grid_data[panel][band][drug]
+                if arr.size == 0 or not np.isfinite(arr).any():
+                    continue
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    mu = np.nanmean(arr, axis=0)
+                    n = np.isfinite(arr).sum(axis=0).astype(float)
+                    sd = np.nanstd(arr, axis=0, ddof=1)
+                    se = np.divide(
+                        sd, np.sqrt(np.maximum(n, 1.0)),
+                        out=np.zeros_like(sd), where=n > 1,
+                    )
+                ax.plot(grid, mu, color=color, lw=1.4,
+                        label=lab if i == 0 and j == 0 else None)
+                ax.fill_between(grid, mu - se, mu + se, color=color, alpha=0.22, lw=0)
+            if panel == "wpli":
+                ax.set_ylim(0, 1)
+            else:
+                ax.axhline(1.0, color="0.6", lw=0.7, ls="--")
+            if i == 0:
+                ax.set_title(band, fontsize=9, color=BAND_COLORS[band])
+            if j == 0:
+                ax.set_ylabel(ylab, fontsize=8)
+            if i == 2:
+                ax.set_xlabel("session fraction", fontsize=8)
+            ax.set_xlim(0, 1)
+            ax.tick_params(labelsize=7)
+    if axes[0, 0].get_legend_handles_labels()[0]:
+        axes[0, 0].legend(fontsize=7, frameon=False)
+    fig.suptitle(
+        _t(f"F11 — Exploratory: C1/C2 mean ± SEM (n={n_mice} paired mice)"),
+        fontweight="bold",
+    )
+    fig.tight_layout()
+    fig.savefig(out / "F11_band_traces.pdf")
+    plt.close(fig)
+
+
+def fig12_band_compare(
+    windows: pd.DataFrame,
+    feat: pd.DataFrame,
+    derived: Path,
+    out: Path,
+) -> None:
+    """One C1/C2 mouse: 2x3 sal vs psi band traces (static Stage 9).
+
+    Picks the demo mouse via pick_demo_mouse_windows (prefers C1_F1).
+    """
+    if windows is None or windows.empty or feat is None or feat.empty:
+        print("F12 skipped: need windows.csv and features")
+        return
+    man_cols = [c for c in (
+        "stem", "cohort", "group", "drug", "mouse", "rectype", "subject_uid",
+        "session_uid",
+    ) if c in feat.columns]
+    if "subject_uid" not in man_cols:
+        print("F12 skipped: features missing subject_uid")
+        return
+    manifest = feat[man_cols].drop_duplicates("stem")
+    try:
+        uid = pick_demo_mouse_windows(manifest, windows)
+    except SystemExit as e:
+        print(f"F12 skipped: {e}")
+        return
+    dest = out / f"F12_{uid}_band_compare.pdf"
+    render_band_compare_figure(
+        uid, derived=derived, out=dest, manifest=manifest, feat=feat,
+    )
+
+
 # -----------------------------------------------------------------
 def run(*, derived: Path, out: Path, qc_path: Path | None = None,
         exclude: bool = True) -> None:
+    """Load tables, optionally NaN dead channels, then write F0-F12.
+
+    features_dynamic.csv is merged onto features_session.csv so F8-F10 see
+    the *_winmean / *_winvar columns without requiring --features.
+    """
     global TITLE_SUFFIX
     TITLE_SUFFIX = " (dead channels excluded)" if exclude else ""
     out.mkdir(parents=True, exist_ok=True)
@@ -501,6 +645,7 @@ def run(*, derived: Path, out: Path, qc_path: Path | None = None,
     windows = _load_windows(derived)
     audit = pd.DataFrame()
 
+    # Bring window reductions onto the session table (same stem = same recording).
     if dyn is not None and feat is not None:
         extra = [c for c in dyn.columns if c not in feat.columns]
         if extra:
@@ -534,6 +679,8 @@ def run(*, derived: Path, out: Path, qc_path: Path | None = None,
         fig8_wpli_var_slopegraph(feat, out); print("F8 ok")
         fig9_wpli_triangles(feat, out); print("F9 ok")
         fig10_delta_slopegraphs(feat, out); print("F10 ok")
+        fig11_band_traces(windows, feat, out); print("F11 ok")
+        fig12_band_compare(windows, feat, derived, out); print("F12 ok")
 
     print(f"\nFigures written to {out}")
 

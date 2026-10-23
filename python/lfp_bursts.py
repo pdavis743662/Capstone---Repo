@@ -14,10 +14,11 @@ from scipy import signal
 
 from lfp_config import BANDS, REGIONS
 
+# Same numbers as data_ingestion.ipynb Stage 3. Burst detection is beta-only.
 BURST_BAND = tuple(BANDS["beta"])
 BURST_PCTILE = 75.0
 BURST_MIN_MS = 150.0
-BURST_MERGE_MS = 50.0
+BURST_MERGE_MS = 50.0  # close two events if the gap is shorter than this
 
 
 def beta_envelope(
@@ -25,6 +26,7 @@ def beta_envelope(
     fs: float,
     band: tuple[float, float] = BURST_BAND,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Zero-phase bandpass, then Hilbert magnitude. Returns (filtered, envelope)."""
     sos = signal.butter(4, band, btype="bandpass", fs=fs, output="sos")
     xb = signal.sosfiltfilt(sos, np.asarray(x, dtype=np.float64))
     return xb, np.abs(signal.hilbert(xb))
@@ -37,7 +39,7 @@ def envelope_threshold(
     pctile: float = BURST_PCTILE,
     band: tuple[float, float] = BURST_BAND,
 ) -> float:
-    """Amplitude threshold from one recording — normally that animal's BL1."""
+    """Amplitude threshold from one recording, normally that animal's BL1."""
     _, env = beta_envelope(x, fs, band)
     ref = env[good] if good.sum() > 10 * fs else env
     return float(np.percentile(ref, pctile))
@@ -63,6 +65,7 @@ def detect_bursts(
         ref = env[good] if good.sum() > 10 * fs else env
         thr = float(np.percentile(ref, pctile))
 
+    # good is True on usable samples (inverse of the Stage-2 artifact mask).
     above = (env > thr) & np.asarray(good, dtype=bool)
     d = np.diff(above.astype(int), prepend=0, append=0)
     starts = np.flatnonzero(d == 1)
@@ -70,6 +73,7 @@ def detect_bursts(
     if starts.size == 0:
         return starts.astype(float), ends.astype(float), xb
 
+    # Merge runs separated by a short below-threshold gap.
     if len(starts) > 1:
         gap = (starts[1:] - ends[:-1]) / fs * 1000
         keep = np.concatenate([[True], gap > merge_ms])

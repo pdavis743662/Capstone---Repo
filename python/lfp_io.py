@@ -22,12 +22,15 @@ import numpy as np
 
 from lfp_config import REGIONS
 
+# macOS returns errno 89 when np.load hits an iCloud placeholder.
 _ECANCELED = getattr(errno, "ECANCELED", 89)
+# Finder flag: file exists but the body is not on disk.
 _SF_DATALESS = 0x40000000
 _CHUNK = 256 * 1024
 
 
 def _canceled(exc: BaseException) -> bool:
+    """True when macOS aborted a read of an iCloud placeholder (errno 89)."""
     return isinstance(exc, OSError) and getattr(exc, "errno", None) == _ECANCELED
 
 
@@ -85,6 +88,7 @@ def hydrate(path: Path | str, *, timeout_s: float = 180) -> None:
 
 
 def _scratch_dirs(src: Path) -> list[Path]:
+    """Prefer /tmp, then derived/clean/.npz_tmp next to the source."""
     dirs = [Path(tempfile.gettempdir()), src.parent / ".npz_tmp"]
     out: list[Path] = []
     seen: set[Path] = set()
@@ -103,6 +107,7 @@ def _scratch_dirs(src: Path) -> list[Path]:
 
 
 def _copy_chunked(src: Path, dest: Path) -> None:
+    """Copy in chunks and fsync so np.load does not read a partial file."""
     with open(src, "rb") as inf, open(dest, "wb") as out:
         while True:
             buf = inf.read(_CHUNK)
@@ -114,6 +119,7 @@ def _copy_chunked(src: Path, dest: Path) -> None:
 
 
 def _arrays_from_npz(path: Path) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], float]:
+    """Unpack Stage-2 keys: fs, lfp_{region}, mask_{region} (True = artifact)."""
     with np.load(path, allow_pickle=False) as z:
         fs = float(z["fs"])
         lfp = {
@@ -136,7 +142,11 @@ def load_clean(
     retry_sleep_s: float = 0.4,
     hydrate_timeout_s: float = 180,
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], float]:
-    """Return ``({region: lfp}, {region: artifact_mask}, fs)`` from a Stage-2 npz."""
+    """Return ``({region: lfp}, {region: artifact_mask}, fs)`` from a Stage-2 npz.
+
+    Always copy to a local temp file first. Direct ``np.load`` of an iCloud
+    path can hang even after hydrate() reports the file as local.
+    """
     src = Path(path)
     hydrate(src, timeout_s=hydrate_timeout_s)
     last: BaseException | None = None

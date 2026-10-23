@@ -30,6 +30,7 @@ _trapz = getattr(np, "trapezoid", None) or np.trapz
 
 
 def _nperseg(fs: float, n: int) -> int:
+    """Welch nperseg from NPERSEG_S, clipped to the current window length."""
     nper = int(round(NPERSEG_S * fs))
     return max(8, min(nper, n))
 
@@ -77,7 +78,11 @@ def window_connectivity(
     tag: str,
     nperseg: int | None = None,
 ) -> dict[str, float]:
-    """Band-averaged magnitude-squared coherence and wPLI for one window."""
+    """Band-averaged MSC and wPLI for one window.
+
+    ``tag`` is the pair name (BLA-vHPC). Columns: {tag}_coh_{band}, {tag}_wpli_{band}.
+    wPLI = |mean(Im(CSD))| / mean(|Im(CSD)|) over Welch segments; zero-lag drops out.
+    """
     nper = _nperseg(fs, min(len(x), len(y))) if nperseg is None else int(nperseg)
     f, cxy = signal.coherence(x, y, fs=fs, nperseg=nper, noverlap=nper // 2)
     fz, pxy = segment_csd(x, y, fs, nper)
@@ -98,7 +103,11 @@ def union_artifact_mask(
     msk: Mapping[str, np.ndarray],
     n: int,
 ) -> np.ndarray:
-    """True where any region's artifact mask is True."""
+    """True where any region's artifact mask is True.
+
+    Stage-2 masks are True = bad. Connectivity needs all three sites aligned,
+    so a window is scored against this union, not per-region masks.
+    """
     out = np.zeros(n, dtype=bool)
     for v in msk.values():
         if len(v) == n:
@@ -115,7 +124,11 @@ def window_features(
     hop_s: float = HOP_S,
     max_artifact_frac: float = MAX_ARTIFACT_FRAC,
 ) -> pd.DataFrame:
-    """One row per kept window: band power per region, coh/wPLI per pair."""
+    """One row per kept window: band power per region, coh/wPLI per pair.
+
+    Each window is independent (good samples are not concatenated across the session).
+    Columns include t_start, t_end, frac_artifact, then the feature names in lfp_config.
+    """
     if not lfp:
         return pd.DataFrame()
     n = int(next(iter(lfp.values())).shape[-1])

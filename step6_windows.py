@@ -16,7 +16,9 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-from scipy import signal as _scipy_signal  # noqa: F401  load before python/ is on path
+# Import scipy before python/ is on sys.path so scipy.signal.windows is not
+# shadowed if an old windows.py is still on disk.
+from scipy import signal as _scipy_signal  # noqa: F401
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "python"))
@@ -55,7 +57,10 @@ def process_stems(
     *,
     progress: bool = True,
 ) -> tuple[pd.DataFrame, list[dict]]:
-    """Compute window rows for each stem. Failed files are listed, not raised."""
+    """Compute window rows for each stem. Failed files are listed, not raised.
+
+    prefetch() asks iCloud to download dataless npz files before the loop.
+    """
     rows: list[pd.DataFrame] = []
     fails: list[dict] = []
     n = len(stems)
@@ -106,6 +111,10 @@ def run(
     stems: list[str] | None = None,
     reduce_only: bool = False,
 ) -> None:
+    """Write windows.parquet (or .csv) then features_dynamic.csv.
+
+    --reduce-only rebuilds the session merge without re-reading npz files.
+    """
     derived = Path(derived)
     derived.mkdir(parents=True, exist_ok=True)
     clean_dir = Path(clean_dir) if clean_dir is not None else derived / "clean"

@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-from scipy import signal as _scipy_signal  # noqa: F401
+from scipy import signal as _scipy_signal  # noqa: F401  load scipy before python/ is on path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "python"))
@@ -27,6 +27,7 @@ from lfp_video import DEFAULT_FPS  # noqa: E402
 
 
 def _features(derived: Path) -> pd.DataFrame | None:
+    """Prefer features_dynamic.csv so the end card can show winmean wPLI."""
     dyn = derived / "features_dynamic.csv"
     sess = derived / "features_session.csv"
     if dyn.exists():
@@ -36,15 +37,10 @@ def _features(derived: Path) -> pd.DataFrame | None:
     return None
 
 
-def run(
-    *,
-    derived: Path,
-    out: Path,
-    mouse: str | None = None,
-    demo: bool = False,
-    speed: float = COMPARE_SPEED,
-    fps: float = DEFAULT_FPS,
-) -> Path:
+def run(*, derived: Path, out: Path, mouse: str | None = None,
+        demo: bool = False, speed: float = COMPARE_SPEED,
+        fps: float = DEFAULT_FPS) -> Path:
+    """Encode figures_video/<subject_uid>/compare_sal_vs_psi.mp4."""
     derived = Path(derived)
     man = pd.read_csv(derived / "manifest.csv")
     uid = pick_demo_mouse(man, derived / "clean") if demo or not mouse else mouse

@@ -1,0 +1,8 @@
+analysis,note,estimate,p
+cell counts,"{('ket', 'psi'): 7, ('ket', 'sal'): 4, ('sal', 'psi'): 8, ('sal', 'sal'): 6}",,
+OLS Intercept,,0.4774388418503111,1.814729789895124e-14
+OLS C(blocker)[T.sal],,-0.0585013625196005,0.07893867667046486
+OLS C(drug)[T.sal],,0.06502653769797424,0.15241913506658064
+OLS C(cohort)[T.C4],,-0.020644662139391687,0.4979921732879231
+OLS C(blocker)[T.sal]:C(drug)[T.sal],,0.037084547338943175,0.5255918243556315
+INTERPRETATION,"The C(blocker):C(drug) interaction term is the 5-HT2A-dependence test. With n=2-5 per cell it is underpowered -- report the estimate and CI, and do not lean on the p-value.",,

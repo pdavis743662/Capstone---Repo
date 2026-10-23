@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
-from scipy import signal as _scipy_signal  # noqa: F401  load before python/ is on path
+from scipy import signal as _scipy_signal  # noqa: F401  load scipy before python/ is on path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "python"))
@@ -28,6 +28,7 @@ DEMO_STEMS = ("Psi_C1_psi_F1_EZM", "Psi_C1_sal_F1_EZM")
 
 
 def resolve_stems(man: pd.DataFrame, stems: list[str] | None, mouse: str | None, demo: bool) -> list[str]:
+    """Map CLI flags to filename stems. --mouse accepts subject_uid or session_uid."""
     if demo:
         return list(DEMO_STEMS)
     if stems:
@@ -58,6 +59,7 @@ def run(
     speed: float = DEFAULT_SPEED,
     fps: float = DEFAULT_FPS,
 ) -> list[Path]:
+    """Write one MP4 per stem under ``out / subject_uid / {stem}.mp4``."""
     derived = Path(derived)
     out_root = Path(out)
     man = pd.read_csv(derived / "manifest.csv")

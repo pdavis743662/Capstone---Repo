@@ -24,11 +24,12 @@ from lfp_config import FMAX_SPEC, FMIN_SPEC, NPERSEG_S, PAIRS, REGIONS
 from lfp_io import load_clean
 from lfp_windows import window_features
 
-TRACE_WIN_S = 4.0
-DEFAULT_SPEED = 40.0
+TRACE_WIN_S = 4.0       # seconds of LFP shown in the scrolling trace panel
+DEFAULT_SPEED = 40.0    # LFP seconds per video second (Stage 7 default)
 DEFAULT_FPS = 20.0
 PAIR_WPLI = "BLA-vHPC_wpli_beta"
 PAIR_COH = "BLA-vHPC_coh_beta"
+# Layout of the 3-node cartoon (not anatomy). BLA at the top.
 _NODE_XY = {"BLA": (0.50, 0.78), "vHPC": (0.18, 0.22), "mPFC": (0.82, 0.22)}
 _EDGE_CMAP = plt.cm.viridis
 
@@ -81,6 +82,7 @@ def paint_wpli_triangle(
 
 
 def apply_wpli_triangle(edge_lines, edge_vals: dict[tuple[str, str], float]) -> None:
+    """Color and thicken edges by beta wPLI (0-1). Missing values stay grey."""
     for (a, b), el in edge_lines.items():
         val = edge_vals.get((a, b), np.nan)
         if not np.isfinite(val):
@@ -92,10 +94,12 @@ def apply_wpli_triangle(edge_lines, edge_vals: dict[tuple[str, str], float]) -> 
 
 
 def _move_vline(ln, t: float) -> None:
+    """Move a playhead line without redrawing the rest of the axes."""
     ln.set_xdata([t, t])
 
 
 def _ffmpeg_path() -> str:
+    """Prefer system ffmpeg, then the imageio-ffmpeg wheel."""
     exe = shutil.which("ffmpeg")
     if exe:
         return exe
@@ -110,6 +114,7 @@ def _ffmpeg_path() -> str:
 
 
 def _read_stem_windows(derived: Path, stem: str) -> pd.DataFrame:
+    """Rows for one recording from windows.parquet or windows.csv."""
     parquet = derived / "windows.parquet"
     csv_path = derived / "windows.csv"
     win = None
@@ -123,6 +128,7 @@ def _read_stem_windows(derived: Path, stem: str) -> pd.DataFrame:
 
 
 def _window_at(win: pd.DataFrame, t: float) -> pd.Series | None:
+    """Window containing time t, or the nearest midpoint if t sits in a gap."""
     if win is None or win.empty:
         return None
     inside = win[(win.t_start <= t) & (t < win.t_end)]
@@ -133,6 +139,7 @@ def _window_at(win: pd.DataFrame, t: float) -> pd.Series | None:
 
 
 def _spans_in(starts: np.ndarray, ends: np.ndarray, t0: float, t1: float):
+    """Burst intervals clipped to the visible trace window [t0, t1]."""
     out = []
     for s, e in zip(starts, ends):
         if e < t0 or s > t1:
@@ -142,6 +149,7 @@ def _spans_in(starts: np.ndarray, ends: np.ndarray, t0: float, t1: float):
 
 
 def _spectrogram(x: np.ndarray, fs: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (times, freqs 1-100 Hz, power in dB) for the spec panel."""
     nper = int(round(NPERSEG_S * fs))
     nper = max(8, min(nper, len(x)))
     f, ts, Sxx = signal.spectrogram(x, fs=fs, nperseg=nper, noverlap=nper // 2)
@@ -161,7 +169,13 @@ def render_session_video(
     dpi: int = 110,
     trace_win_s: float = TRACE_WIN_S,
 ) -> Path:
-    """Write one MP4 for ``stem`` under ``out`` (parent should already exist)."""
+    """Write one MP4 for ``stem`` under ``out`` (parent should already exist).
+
+    Layout: traces | spectrograms | beta wPLI triangle
+            burst raster across the full session
+            BLA-vHPC beta wPLI (solid) and MSC (dashed)
+    Burst shading on traces uses that week's BL1 envelope threshold when BL1 loads.
+    """
     derived = Path(derived)
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -192,6 +206,7 @@ def render_session_video(
     hop = max(1, int(fs // 250))
     t_full = np.arange(n) / fs
 
+    # Per-region y limits from 1st-99th percentile so a spike does not flatten the trace.
     ylims = {}
     for r in regions:
         x = lfp[r]
@@ -322,6 +337,7 @@ def render_session_video(
     title = fig.suptitle("", fontsize=13, fontweight="bold")
 
     def _update_net(wrow: pd.Series | None) -> None:
+        """Edge color = beta wPLI; node radius scales with log BLA/vHPC/mPFC abs beta."""
         for (a, b), el in edge_lines.items():
             col = f"{a}-{b}_wpli_beta"
             val = float(wrow[col]) if wrow is not None and col in wrow.index else np.nan
@@ -341,6 +357,7 @@ def render_session_video(
             circ.set_radius(rad)
 
     def update(t: float) -> None:
+        """Draw one video frame at LFP time t. Artifact samples are NaN'd (gaps)."""
         half = trace_win_s / 2
         t0 = max(0.0, t - half)
         t1 = min(dur, t + half)

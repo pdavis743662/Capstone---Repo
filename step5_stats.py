@@ -14,11 +14,14 @@ Run:
                           --metric burst_rate_per_min --out ../results
     python step5_stats.py --features ../derived/features_dynamic.csv \
                           --metrics primary --out ../results
+    python step5_stats.py --features ../derived/features_dynamic.csv \
+                          --metrics exploratory --out ../results
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -28,7 +31,7 @@ from scipy import stats
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "python"))
-from lfp_config import PRIMARY_METRICS  # noqa: E402
+from lfp_config import EXPLORATORY_METRICS, PRIMARY_METRICS  # noqa: E402
 from exclusions import (  # noqa: E402
     apply_exclusions,
     bad_channel_map,
@@ -36,11 +39,17 @@ from exclusions import (  # noqa: E402
     find_bad_channels,
 )
 
-try:
-    import statsmodels.formula.api as smf
-    HAVE_SM = True
-except ImportError:
+# iCloud can make `import statsmodels` hang. SKIP_STATSMODELS=1 keeps paired-t FDR.
+if os.environ.get("SKIP_STATSMODELS"):
+    smf = None
     HAVE_SM = False
+else:
+    try:
+        import statsmodels.formula.api as smf
+        HAVE_SM = True
+    except ImportError:
+        smf = None
+        HAVE_SM = False
 
 CHECKLIST = [
     "## Reporting checklist",
@@ -56,21 +65,38 @@ CHECKLIST = [
 
 
 def _formula_frame(df: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, str]:
-    """Rename hyphenated metrics so patsy formulas parse."""
+    """Rename hyphenated metrics so patsy formulas parse.
+
+    BLA-vHPC_wpli_beta becomes BLA_vHPC_wpli_beta inside the model only.
+    """
     safe = metric.replace("-", "_")
     if safe == metric:
         return df, metric
     return df.rename(columns={metric: safe}), safe
 
 
-def parse_metrics(metric: str | None, metrics: str | None) -> list[str]:
-    """``--metrics primary`` or a comma list; else a single ``--metric``."""
+# Named families write report__{family}_metrics_clean.md. A comma list is "custom"
+# so it cannot overwrite the confirmatory FDR file.
+METRIC_FAMILIES = {
+    "primary": PRIMARY_METRICS,
+    "exploratory": EXPLORATORY_METRICS,
+}
+
+
+def parse_metrics(metric: str | None, metrics: str | None) -> tuple[list[str], str]:
+    """Return ``(names, family)``.
+
+    ``family`` is ``primary``, ``exploratory``, ``custom`` (comma list), or
+    ``single``. Multi-metric FDR files are named after the family so a custom
+    list cannot overwrite the confirmatory table.
+    """
     if metrics:
         raw = metrics.strip()
-        if raw.lower() == "primary":
-            return list(PRIMARY_METRICS)
-        return [m.strip() for m in raw.split(",") if m.strip()]
-    return [metric or "burst_rate_per_min"]
+        key = raw.lower()
+        if key in METRIC_FAMILIES:
+            return list(METRIC_FAMILIES[key]), key
+        return [m.strip() for m in raw.split(",") if m.strip()], "custom"
+    return [metric or "burst_rate_per_min"], "single"
 
 
 # ------------------------------------------------------------------
@@ -83,6 +109,7 @@ def to_animal_level(df: pd.DataFrame, metric: str, rectypes) -> pd.DataFrame:
 
 
 def bootstrap_ci(x, n=10000, stat=np.mean, alpha=.05, seed=0):
+    """Percentile CI of ``stat`` by resampling animals (or whatever vector you pass)."""
     rng = np.random.default_rng(seed)
     x = np.asarray(x, float)
     x = x[np.isfinite(x)]
@@ -93,6 +120,7 @@ def bootstrap_ci(x, n=10000, stat=np.mean, alpha=.05, seed=0):
 
 
 def hedges_g(a, b):
+    """Bias-corrected Cohen's d for two independent groups (C3 arms)."""
     a, b = np.asarray(a, float), np.asarray(b, float)
     na, nb = len(a), len(b)
     if na < 2 or nb < 2:
@@ -132,6 +160,10 @@ def fdr(pvals, q=.05):
 
 # ------------------------------------------------------------------
 def analysis_crossover(df, metric, rectypes=("EZM",)) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """C1/C2: one value per mouse-week, then paired psi minus sal.
+
+    Returns (summary table, leave-one-mouse-out table). FDR in run() uses p_paired_t.
+    """
     a = to_animal_level(df[df.cohort.isin(["C1", "C2"])], metric, rectypes)
     empty_loo = pd.DataFrame(columns=["dropped_mouse", "mean_diff", "p_paired_t"])
     if a.empty or not {"sal", "psi"}.issubset(set(a.drug.unique())):
@@ -194,6 +226,7 @@ def analysis_crossover(df, metric, rectypes=("EZM",)) -> tuple[pd.DataFrame, pd.
 
 
 def analysis_c3(df, metric, rectypes=("EPM",)) -> pd.DataFrame:
+    """Between-mouse three-arm. ket is a different animal (blocker=ket, drug=psi)."""
     a = to_animal_level(df[df.cohort == "C3"], metric, rectypes)
     g = {k: v[metric].values for k, v in a.groupby("group")}
     rows = []
@@ -217,6 +250,7 @@ def analysis_c3(df, metric, rectypes=("EPM",)) -> pd.DataFrame:
 
 
 def analysis_pooled_2x2(df, metric, rectypes=("EPM",)) -> pd.DataFrame:
+    """C3+C4: blocker * drug interaction is the 5-HT2A test. Underpowered; report CI."""
     a = to_animal_level(df[df.cohort.isin(["C3", "C4"])], metric, rectypes)
     rows = [dict(analysis="cell counts",
                  note=str(a.groupby(["blocker", "drug"]).size().to_dict()))]
@@ -307,6 +341,7 @@ def _crossover_p(xtab: pd.DataFrame) -> float:
 
 
 def _run_one(df: pd.DataFrame, metric: str, out: Path, suffix: str) -> dict:
+    """Write per-metric CSVs and a markdown report. Returns the crossover row for FDR."""
     xtab, loo = analysis_crossover(df, metric)
     blocks = {
         "crossover_C1C2": xtab,
@@ -339,9 +374,13 @@ def _run_one(df: pd.DataFrame, metric: str, out: Path, suffix: str) -> dict:
 def run(*, features: Path, out: Path, metric: str = "burst_rate_per_min",
         metrics: str | None = None, qc_path: Path | None = None,
         exclude: bool = True) -> None:
+    """Run all three designs for each requested metric, then BH-FDR on C1/C2 p-values.
+
+    suffix _clean is added when exclusions are on so dirty and clean reports can coexist.
+    """
     out.mkdir(parents=True, exist_ok=True)
     suffix = "_clean" if exclude else ""
-    wanted = parse_metrics(metric, metrics)
+    wanted, family = parse_metrics(metric, metrics)
 
     df = pd.read_csv(features)
     missing = [m for m in wanted if m not in df.columns]
@@ -381,20 +420,34 @@ def run(*, features: Path, out: Path, metric: str = "burst_rate_per_min",
             rej[finite] = r
         fdr_tbl["p_crossover_fdr"] = padj
         fdr_tbl["reject_fdr"] = rej
-    dest = out / f"primary_metrics_fdr{suffix}.csv"
+    family_stem = {
+        "primary": "primary_metrics",
+        "exploratory": "exploratory_metrics",
+        "custom": "custom_metrics",
+        "single": keep[0] if len(keep) == 1 else "custom_metrics",
+    }[family]
+    dest = out / f"{family_stem}_fdr{suffix}.csv"
     fdr_tbl.to_csv(dest, index=False)
 
-    header = keep[0] if len(keep) == 1 else "primary_metrics"
-    lines = [f"# Statistical report — metrics: {', '.join(f'`{m}`' for m in keep)}", ""]
+    title = f"# Statistical report — metrics: {', '.join(f'`{m}`' for m in keep)}"
+    lines = [title, ""]
+    if family == "exploratory":
+        lines += [
+            "_Exploratory family. FDR is within this list only. "
+            "`BLA_abs_beta__vs_bl1` and `vHPC_abs_theta__vs_bl1` also appear in "
+            "`PRIMARY_METRICS`; they are included here so band-specificity is "
+            "tested under one correction. Do not treat new rejections as confirmatory._",
+            "",
+        ]
+    elif family == "primary":
+        lines += ["_Confirmatory family declared in `PRIMARY_METRICS`._", ""]
     if exclude:
         lines += ["_Dead channels excluded. Filenames use the `_clean` suffix._", ""]
     lines += excl_md
     lines += ["## C1/C2 crossover FDR across metrics", "",
               fdr_tbl.to_markdown(index=False), ""]
     lines += CHECKLIST
-    summary_report = out / f"report__{header}{suffix}.md"
-    if len(keep) > 1:
-        summary_report = out / f"report__primary_metrics{suffix}.md"
+    summary_report = out / f"report__{family_stem}{suffix}.md"
     summary_report.write_text("\n".join(lines))
     print(f"\nWrote {summary_report}")
     print(f"Wrote {dest}")
@@ -405,7 +458,7 @@ def main() -> None:
     ap.add_argument("--features", required=True, type=Path)
     ap.add_argument("--metric", default="burst_rate_per_min")
     ap.add_argument("--metrics", default=None,
-                    help="comma-separated list, or 'primary' for the declared set")
+                    help="comma-separated list, or 'primary' / 'exploratory'")
     ap.add_argument("--out", default=Path("../results"), type=Path)
     ap.add_argument("--qc", default=None, type=Path,
                     help="QC table (default: <features-dir>/qc.csv)")

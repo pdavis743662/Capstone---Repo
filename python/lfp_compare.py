@@ -35,7 +35,7 @@ from lfp_video import (
 )
 from lfp_windows import window_features
 
-COMPARE_SPEED = 4.0
+COMPARE_SPEED = 4.0  # slower than Stage 7 so both weeks are watchable
 COLORS = {"BLA": "tab:blue", "vHPC": "tab:orange", "mPFC": "tab:green"}
 EDGE_LABELS = {
     ("BLA", "vHPC"): "BLA–vHPC",
@@ -46,6 +46,7 @@ EDGE_LABELS = {
 
 @dataclass
 class Side:
+    """Everything needed to draw one week (saline or psilocybin) of the movie."""
     drug: str
     label: str
     stem: str
@@ -63,6 +64,7 @@ class Side:
 
 
 def _mean_edges(win: pd.DataFrame) -> dict:
+    """Session-mean beta wPLI per pair, used when the feature table has no row."""
     if win is None or win.empty:
         return triangle_edge_vals(None)
     means = win[[c for c in win.columns if c.endswith("_wpli_beta")]].mean()
@@ -70,6 +72,7 @@ def _mean_edges(win: pd.DataFrame) -> dict:
 
 
 def _row_for_stem(feat: pd.DataFrame | None, stem: str) -> pd.Series | None:
+    """One session-level feature row, or None if the table was not passed."""
     if feat is None or feat.empty or "stem" not in feat.columns:
         return None
     hit = feat[feat.stem == stem]
@@ -84,6 +87,7 @@ def _load_side(
     manifest: pd.DataFrame,
     feat: pd.DataFrame | None,
 ) -> Side:
+    """Load maze LFP, bursts, windows, and BL1 triangle for one drug week."""
     stem = stems["beh"]
     meta = manifest.loc[manifest.stem == stem].iloc[0]
     clean = derived / "clean"
@@ -135,7 +139,7 @@ def _num(row: pd.Series | None, col: str) -> float:
 
 
 def _fmt(x: float, nd: int = 2) -> str:
-    return "—" if not np.isfinite(x) else f"{x:.{nd}f}"
+    return "-" if not np.isfinite(x) else f"{x:.{nd}f}"
 
 
 def render_compare_video(
@@ -150,6 +154,7 @@ def render_compare_video(
     dpi: int = 100,
     trace_win_s: float = TRACE_WIN_S,
 ) -> Path:
+    """Two-column movie. Playhead is session fraction so unequal EZM lengths stay aligned."""
     derived = Path(derived)
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -245,6 +250,7 @@ def render_compare_video(
     title = fig.suptitle("", fontsize=13, fontweight="bold")
 
     def update_side(drug: str, frac: float) -> None:
+        """``frac`` is 0-1 through that week's maze, not clock time."""
         A = artists[drug]
         side: Side = A["side"]
         t = float(np.clip(frac, 0, 1) * side.dur)
@@ -279,6 +285,7 @@ def render_compare_video(
         apply_wpli_triangle(A["net"], triangle_edge_vals(_window_at(side.win, t)))
 
     def draw_endcard(visible: bool) -> None:
+        """Hold last frame and print this mouse's burst rate and Delta wPLI (EZM - BL1)."""
         ax_end.clear()
         ax_end.axis("off")
         if not visible:

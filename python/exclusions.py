@@ -18,13 +18,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# Duplicated here so this module can run as a CLI without importing lfp_config.
 REGIONS = ("BLA", "vHPC", "mPFC")
 
-# See module docstring for the empirical justification.
+# See module docstring. The robust floor is printed for comparison only;
+# apply_exclusions uses the fixed LOG_RMS_FLOOR.
 LOG_RMS_FLOOR = 2.0
 KURTOSIS_CEILING = 20.0
 ROBUST_MAD_K = 5.0
-MAD_SCALE = 1.4826
+MAD_SCALE = 1.4826  # converts MAD to an SD-like scale if data were Gaussian
 
 META_COLS = ("cohort", "group", "drug", "rectype", "mouse", "subject_uid")
 
@@ -37,6 +39,7 @@ def _log10_rms(rms: pd.Series) -> pd.Series:
 
 
 def _robust_floor(log_rms: pd.Series) -> float:
+    """median - k * 1.4826 * MAD. Printed in find_bad_channels, not applied."""
     x = np.asarray(log_rms, float)
     x = x[np.isfinite(x)]
     if len(x) == 0:
@@ -113,7 +116,11 @@ def bad_channel_map(bad_df: pd.DataFrame) -> dict[str, set[str]]:
 
 
 def _column_touches_region(col: str, region: str) -> bool:
-    """True for `{region}_...` columns and pair prefixes like `BLA-vHPC_`."""
+    """True for `{region}_...` columns and pair prefixes like `BLA-vHPC_`.
+
+    Pair names sit in the first underscore field (BLA-vHPC_wpli_beta).
+    A bad mPFC therefore NaNs BLA-mPFC_* and vHPC-mPFC_* but not BLA_abs_beta.
+    """
     if col.startswith(f"{region}_"):
         return True
     head = col.split("_", 1)[0]
